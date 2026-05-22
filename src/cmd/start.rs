@@ -52,10 +52,12 @@ pub fn run(args: StartArgs) {
 
     // Enter leap key table and accept input
     let socket = InputSocket::new().expect("failed to create input socket");
-    tmux::exec(&["set-option", "-g", "prefix", "None"]);
-    tmux::exec(&["set-option", "-g", "prefix2", "None"]);
-    tmux::exec(&["set-window-option", "key-table", "leap"]);
-    tmux::exec(&["switch-client", "-T", "leap"]);
+    tmux::exec_batch(&[
+        &["set-option", "-g", "prefix", "None"],
+        &["set-option", "-g", "prefix2", "None"],
+        &["set-window-option", "key-table", "leap"],
+        &["switch-client", "-T", "leap"],
+    ]);
 
     let matched = session.input_loop(&socket, &config);
 
@@ -190,18 +192,16 @@ impl HintsSession {
         }
 
         // Pair source ↔ leap panes by (top, left)
-        let mut leap_panes = pane::list_panes_in_window(&fw.window_id);
-        let mut pairs = pair_by_position(&source_panes, &leap_panes);
+        let leap_panes = pane::list_panes_in_window(&fw.window_id);
+        let pairs = pair_by_position(&source_panes, &leap_panes);
 
-        // Repair any rounding mismatches
+        // Repair any rounding mismatches. resize_pane does not change pane_id or
+        // pane_tty, so the pairs are still valid afterward — no re-list needed.
         for (src, fng) in &pairs {
             if src.pane_width != fng.pane_width || src.pane_height != fng.pane_height {
                 pane::resize_pane(&fng.pane_id, src.pane_width, src.pane_height);
             }
         }
-        // Re-fetch after resize
-        leap_panes = pane::list_panes_in_window(&fw.window_id);
-        pairs = pair_by_position(&source_panes, &leap_panes);
 
         // Build PaneInputs
         let join = mode != "jump";
@@ -249,17 +249,17 @@ impl HintsSession {
     }
 
     fn render_all(&mut self) {
+        let swaps: Vec<(&str, &str)> = self.pane_pairs
+            .iter()
+            .map(|(src, fng)| (fng.pane_id.as_str(), src.pane_id.as_str()))
+            .collect();
         // ADR 0002/0004: zoomed → swap first, then render
         if self.zoomed {
-            for (src, fng) in &self.pane_pairs {
-                pane::swap_panes(&fng.pane_id, &src.pane_id, true);
-            }
+            pane::swap_panes_batch(&swaps, true);
             let _ = self.hinter.run(&self.state);
         } else {
             let _ = self.hinter.run(&self.state);
-            for (src, fng) in &self.pane_pairs {
-                pane::swap_panes(&fng.pane_id, &src.pane_id, false);
-            }
+            pane::swap_panes_batch(&swaps, false);
         }
     }
 
@@ -303,9 +303,12 @@ fn teardown(
 
     // Swap each pair back (reverse order).
     // Pass zoomed so swap-pane -Z preserves the zoom state (ADR 0002).
-    for (src, fng) in session.pane_pairs.iter().rev() {
-        pane::swap_panes(&fng.pane_id, &src.pane_id, zoomed);
-    }
+    let swaps: Vec<(&str, &str)> = session.pane_pairs
+        .iter()
+        .rev()
+        .map(|(src, fng)| (fng.pane_id.as_str(), src.pane_id.as_str()))
+        .collect();
+    pane::swap_panes_batch(&swaps, zoomed);
 
     pane::kill_window(&session.leap_window.window_id);
 
@@ -333,10 +336,12 @@ fn teardown(
     }
 
     // Restore key table and prefixes
-    tmux::exec(&["set-window-option", "key-table", &saved.last_key_table]);
-    tmux::exec(&["switch-client", "-T", &saved.last_key_table]);
-    tmux::exec(&["set-option", "-g", "prefix", &saved.prefix]);
-    tmux::exec(&["set-option", "-g", "prefix2", &saved.prefix2]);
+    tmux::exec_batch(&[
+        &["set-window-option", "key-table", &saved.last_key_table],
+        &["switch-client", "-T", &saved.last_key_table],
+        &["set-option", "-g", "prefix", &saved.prefix],
+        &["set-option", "-g", "prefix2", &saved.prefix2],
+    ]);
 }
 
 fn pair_by_position(source: &[Pane], leap: &[Pane]) -> Vec<(Pane, Pane)> {

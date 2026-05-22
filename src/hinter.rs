@@ -77,29 +77,28 @@ impl Hinter {
     pub fn run(&mut self, state: &State) -> std::io::Result<()> {
         self.regenerate_hints();
 
-        for i in 0..self.pane_inputs.len() {
-            let tty_path = self.pane_inputs[i].tty_path.clone();
-            let pane_id  = self.pane_inputs[i].pane_id.clone();
-            let width    = self.pane_inputs[i].width;
-            let lines    = self.pane_inputs[i].lines.clone();
+        // Move pane_inputs out so we can iterate by reference while still calling
+        // &mut self methods (process_line, compute_padding). Restored on exit.
+        let pane_inputs = std::mem::take(&mut self.pane_inputs);
 
-            let mut file = std::fs::OpenOptions::new().write(true).open(&tty_path)?;
+        for input in &pane_inputs {
+            let mut file = std::fs::OpenOptions::new().write(true).open(&input.tty_path)?;
             write!(file, "{}{}", CLEAR_SEQ, HIDE_CURSOR_SEQ)?;
 
-            if lines.is_empty() {
+            if input.lines.is_empty() {
                 file.flush()?;
                 continue;
             }
 
-            self.current_pane_id = pane_id;
-            self.current_width   = width;
+            self.current_pane_id = input.pane_id.clone();
+            self.current_width   = input.width;
             self.current_tty     = Some(file);
 
-            let last = lines.len() - 1;
-            for (idx, line) in lines.iter().enumerate() {
+            let last = input.lines.len() - 1;
+            for (idx, line) in input.lines.iter().enumerate() {
                 let ending  = if idx < last { "\n" } else { "" };
                 let rendered = self.process_line(line, idx, state);
-                let pad_w = self.compute_padding(line, width);
+                let pad_w = self.compute_padding(line, input.width);
                 let padding = if pad_w > 0 { " ".repeat(pad_w) } else { String::new() };
                 if let Some(ref mut tty) = self.current_tty {
                     write!(tty, "{}{}{}", rendered, padding, ending)?;
@@ -109,6 +108,8 @@ impl Hinter {
             if let Some(ref mut tty) = self.current_tty { tty.flush()?; }
             self.current_tty = None;
         }
+
+        self.pane_inputs = pane_inputs;
         Ok(())
     }
 
@@ -157,11 +158,11 @@ impl Hinter {
 
     fn process_line(&mut self, line: &str, line_index: usize, state: &State) -> String {
         // Phase 1: collect raw match info from every pattern (no mutation of self).
-        struct RawMatch {
+        // Borrow slices into `line` rather than allocating per match.
+        struct RawMatch<'a> {
             start: usize,
             end:   usize,
-            full:  String,
-            text:  String,               // captured group or full match
+            text:  &'a str,                 // captured group or full match
             offset: Option<(usize, usize)>, // char-offset of named group within `full`
         }
 
@@ -173,7 +174,6 @@ impl Hinter {
                 raw.push(RawMatch {
                     start: m.start(),
                     end:   m.end(),
-                    full:  m.as_str().to_string(),
                     text,
                     offset,
                 });
@@ -191,8 +191,9 @@ impl Hinter {
         for m in raw {
             if m.start < last_end { continue; } // overlapping — skip
             result.push_str(&line[last_end..m.start]);
+            let full = &line[m.start..m.end];
             let replacement = self.format_match(
-                &m.full, &m.text, m.offset, line_index, m.start, state,
+                full, m.text, m.offset, line_index, m.start, state,
             );
             result.push_str(&replacement);
             last_end = m.end;
@@ -279,16 +280,19 @@ fn primary_text<'a>(cap: &regex::Captures<'a>) -> &'a str {
 /// Extract (captured_text, char_offset_within_full_match).
 /// `match_abs_start` is the byte offset of the full match in the original string,
 /// needed to compute the relative offset of the named group.
-fn extract_capture_info(cap: &regex::Captures, match_abs_start: usize) -> (String, Option<(usize, usize)>) {
+fn extract_capture_info<'h>(
+    cap: &regex::Captures<'h>,
+    match_abs_start: usize,
+) -> (&'h str, Option<(usize, usize)>) {
     let full = cap.get(0).unwrap().as_str();
     if let Some(named) = cap.name("match") {
-        let text = named.as_str().to_string();
+        let text = named.as_str();
         let start_bytes = named.start() - match_abs_start;
         let start_chars = full[..start_bytes].chars().count();
         let len_chars   = text.chars().count();
         (text, Some((start_chars, len_chars)))
     } else {
-        (full.to_string(), None)
+        (full, None)
     }
 }
 

@@ -114,6 +114,27 @@ pub fn swap_panes(src: &str, dst: &str, zoomed: bool) {
     }
 }
 
+/// Run several swap-pane operations in a single tmux invocation.
+pub fn swap_panes_batch(swaps: &[(&str, &str)], zoomed: bool) {
+    match swaps.len() {
+        0 => return,
+        1 => return swap_panes(swaps[0].0, swaps[0].1, zoomed),
+        _ => {}
+    }
+    let mut args: Vec<&str> = Vec::with_capacity(swaps.len() * 8);
+    for (i, (src, dst)) in swaps.iter().enumerate() {
+        if i > 0 { args.push(";"); }
+        args.push("swap-pane");
+        args.push("-d");
+        if zoomed { args.push("-Z"); }
+        args.push("-s");
+        args.push(src);
+        args.push("-t");
+        args.push(dst);
+    }
+    exec(&args);
+}
+
 pub fn kill_pane(id: &str) {
     exec(&["kill-pane", "-t", id]);
 }
