@@ -108,14 +108,22 @@ impl Hinter {
                 continue;
             }
 
-            let last = input.lines.len() - 1;
             for (li, line) in input.lines.iter().enumerate() {
-                let ending = if li < last { "\n" } else { "" };
                 let rendered = self.render_line(line, &cache[pi][li], state);
                 let pad_w = compute_padding(line, input.width);
-                let padding = if pad_w > 0 { " ".repeat(pad_w) } else { String::new() };
-                write!(file, "{}{}{}", rendered, padding, ending)?;
+                // Anchor each line to its absolute row with a CUP escape before the
+                // content. Wide characters that the terminal renders wider than
+                // wcwidth() predicts can no longer push subsequent lines down — each
+                // CUP overrides any auto-wrap from the previous line.
+                write!(file, "\x1b[{};1H{}", li + 1, rendered)?;
+                if pad_w > 0 {
+                    write!(file, "{:1$}", "", pad_w)?;
+                }
             }
+            // Park the cursor at home so any deferred-wrap state on the last line
+            // is consumed by an escape (not a printable byte) before any future
+            // write to this TTY.
+            write!(file, "\x1b[1;1H")?;
 
             file.flush()?;
         }
@@ -328,13 +336,7 @@ fn extract_capture_info<'h>(
 }
 
 fn compute_padding(raw_line: &str, width: usize) -> usize {
-    // Single pass: width counted as 8 columns per tab (matches expand_tabs at col 0;
-    // close enough for typical shell output) plus display_width for everything else.
-    let mut total = 0usize;
-    for c in raw_line.chars() {
-        total += if c == '\t' { 8 } else { display_width::of_char(c) };
-    }
-    width.saturating_sub(total)
+    width.saturating_sub(display_width::of_str_with_tabs(raw_line))
 }
 
 fn expand_tabs(s: &str) -> String {
@@ -445,6 +447,21 @@ mod tests {
     fn trim_keeps_clean_text() {
         assert_eq!(trim_trailing("https://x.com/a"), "https://x.com/a");
         assert_eq!(trim_trailing(""), "");
+    }
+
+    #[test]
+    fn compute_padding_vs16_emoji() {
+        // "⚠️" = U+26A0 (neutral, 1 col) + U+FE0F (VS-16 upgrade → 2 cols).
+        // A line "ab⚠️" has actual display width 4; padding to width 6 should be 2.
+        assert_eq!(compute_padding("ab⚠️", 6), 2);
+    }
+
+    #[test]
+    fn compute_padding_tab_uses_column_relative_stops() {
+        // "abc\tdef": tab at col 3 expands to 5 spaces (next stop col 8), then
+        // "def" → col 11. Padding to width 15 = 4. The previous fixed-8 model
+        // would have over-counted the line as col 14, returning 1.
+        assert_eq!(compute_padding("abc\tdef", 15), 4);
     }
 
     #[test]
