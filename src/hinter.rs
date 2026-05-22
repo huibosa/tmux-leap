@@ -28,19 +28,27 @@ pub struct Hinter {
     reuse_hints: bool,
     backdrop_style: String,
     target_by_hint: HashMap<String, Target>,
-    target_by_text: HashMap<String, Target>,
-    hints: Option<Vec<String>>,
-    current_pane_id: String,
-    current_width: usize,
-    current_tty: Option<std::fs::File>,
+    /// Per-pane, per-line, resolved (non-overlapping) match list with hints assigned.
+    /// Computed once on the first call to `run`; reused on every subsequent render.
+    cache: Option<Vec<Vec<Vec<CachedMatch>>>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Target {
     pub text: String,
-    pub hint: String,
     pub offset: (usize, usize), // (line_index, col)
     pub source_pane_id: String,
+}
+
+/// One match in display order; positions are byte offsets into the source line.
+struct CachedMatch {
+    start: usize,
+    end: usize,
+    /// Byte (start, len) of the named-capture group within the full match,
+    /// for patterns that use `(?P<match>...)`. None for plain patterns.
+    fmt_offset: Option<(usize, usize)>,
+    /// None when the assigned hint is wider than the captured text — render raw.
+    hint: Option<String>,
 }
 
 impl Hinter {
@@ -65,23 +73,20 @@ impl Hinter {
             reuse_hints,
             backdrop_style,
             target_by_hint: HashMap::new(),
-            target_by_text: HashMap::new(),
-            hints: None,
-            current_pane_id: String::new(),
-            current_width: 0,
-            current_tty: None,
+            cache: None,
         }
     }
 
     /// Render hint overlays for all pane inputs. Writes directly to each pane's TTY.
+    /// First call runs the full regex scan and hint assignment; subsequent calls
+    /// reuse the cached match data (matches do not change during a session).
     pub fn run(&mut self, state: &State) -> std::io::Result<()> {
-        self.regenerate_hints();
+        if self.cache.is_none() {
+            self.precompute();
+        }
+        let cache = self.cache.as_ref().expect("cache populated by precompute");
 
-        // Move pane_inputs out so we can iterate by reference while still calling
-        // &mut self methods (process_line, compute_padding). Restored on exit.
-        let pane_inputs = std::mem::take(&mut self.pane_inputs);
-
-        for input in &pane_inputs {
+        for (pi, input) in self.pane_inputs.iter().enumerate() {
             let mut file = std::fs::OpenOptions::new().write(true).open(&input.tty_path)?;
             write!(file, "{}{}", CLEAR_SEQ, HIDE_CURSOR_SEQ)?;
 
@@ -90,26 +95,17 @@ impl Hinter {
                 continue;
             }
 
-            self.current_pane_id = input.pane_id.clone();
-            self.current_width   = input.width;
-            self.current_tty     = Some(file);
-
             let last = input.lines.len() - 1;
-            for (idx, line) in input.lines.iter().enumerate() {
-                let ending  = if idx < last { "\n" } else { "" };
-                let rendered = self.process_line(line, idx, state);
-                let pad_w = self.compute_padding(line, input.width);
+            for (li, line) in input.lines.iter().enumerate() {
+                let ending = if li < last { "\n" } else { "" };
+                let rendered = self.render_line(line, &cache[pi][li], state);
+                let pad_w = compute_padding(line, input.width);
                 let padding = if pad_w > 0 { " ".repeat(pad_w) } else { String::new() };
-                if let Some(ref mut tty) = self.current_tty {
-                    write!(tty, "{}{}{}", rendered, padding, ending)?;
-                }
+                write!(file, "{}{}{}", rendered, padding, ending)?;
             }
 
-            if let Some(ref mut tty) = self.current_tty { tty.flush()?; }
-            self.current_tty = None;
+            file.flush()?;
         }
-
-        self.pane_inputs = pane_inputs;
         Ok(())
     }
 
@@ -119,82 +115,160 @@ impl Hinter {
 
     // ---- private -----------------------------------------------------------
 
-    fn regenerate_hints(&mut self) {
-        let n = self.count_matches();
-        self.hints = Some(huffman::generate_hints(&self.alphabet, n));
-        self.target_by_hint.clear();
-        self.target_by_text.clear();
-    }
-
-    fn count_matches(&self) -> usize {
-        if self.reuse_hints { self.count_unique() } else { self.count_all() }
-    }
-
-    fn count_all(&self) -> usize {
-        let mut total = 0;
-        for input in &self.pane_inputs {
-            for line in &input.lines {
-                for re in &self.compiled {
-                    total += re.find_iter(line).count();
-                }
-            }
+    /// One-pass scan: find all matches in every line of every pane, resolve
+    /// overlaps, generate hints, assign targets. Populates `self.cache` and
+    /// `self.target_by_hint`.
+    fn precompute(&mut self) {
+        // Phase 1: per-pane, per-line, collect non-overlapping matches.
+        struct PreMatch {
+            start: usize,
+            end: usize,
+            captured_text: String,
+            captured_offset: Option<(usize, usize)>,
         }
-        total
-    }
 
-    fn count_unique(&self) -> usize {
-        let mut set: HashSet<String> = HashSet::new();
+        let mut all: Vec<Vec<Vec<PreMatch>>> = Vec::with_capacity(self.pane_inputs.len());
+
         for input in &self.pane_inputs {
+            let mut per_line: Vec<Vec<PreMatch>> = Vec::with_capacity(input.lines.len());
             for line in &input.lines {
+                let mut raw: Vec<(usize, usize, String, Option<(usize, usize)>)> = Vec::new();
                 for re in &self.compiled {
                     for cap in re.captures_iter(line) {
-                        set.insert(primary_text(&cap).to_string());
+                        let m = cap.get(0).unwrap();
+                        let (text, offset) = extract_capture_info(&cap, m.start());
+                        raw.push((m.start(), m.end(), text.to_string(), offset));
+                    }
+                }
+                // start ASC, end DESC — longest wins at same start position.
+                raw.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+
+                let mut resolved = Vec::with_capacity(raw.len());
+                let mut last_end = 0usize;
+                for (start, end, text, offset) in raw {
+                    if start < last_end { continue; }
+                    last_end = end;
+                    resolved.push(PreMatch { start, end, captured_text: text, captured_offset: offset });
+                }
+                per_line.push(resolved);
+            }
+            all.push(per_line);
+        }
+
+        // Phase 2: count for hint generation.
+        let n = if self.reuse_hints {
+            let mut set: HashSet<&str> = HashSet::new();
+            for pane in &all {
+                for line in pane {
+                    for m in line {
+                        set.insert(m.captured_text.as_str());
                     }
                 }
             }
+            set.len()
+        } else {
+            all.iter().flatten().map(|line| line.len()).sum()
+        };
+
+        // Huffman hints, file-cached. Sorted shortest-first; pop yields longest.
+        let mut hint_pool = huffman::generate_hints(&self.alphabet, n);
+
+        // Phase 3: assign hints in iteration order, building cache and target table.
+        let mut hint_by_text: HashMap<String, String> = HashMap::new();
+        let mut cache: Vec<Vec<Vec<CachedMatch>>> = Vec::with_capacity(all.len());
+
+        for (pi, pane_matches) in all.into_iter().enumerate() {
+            let pane_id = self.pane_inputs[pi].pane_id.clone();
+            let mut pane_cache: Vec<Vec<CachedMatch>> = Vec::with_capacity(pane_matches.len());
+
+            for (li, line_matches) in pane_matches.into_iter().enumerate() {
+                let line_str = &self.pane_inputs[pi].lines[li];
+                let mut cached: Vec<CachedMatch> = Vec::with_capacity(line_matches.len());
+
+                for m in line_matches {
+                    let (was_popped, hint) = if self.reuse_hints {
+                        if let Some(h) = hint_by_text.get(&m.captured_text) {
+                            (false, h.clone())
+                        } else {
+                            (true, hint_pool.pop().unwrap_or_else(|| "?".into()))
+                        }
+                    } else {
+                        (true, hint_pool.pop().unwrap_or_else(|| "?".into()))
+                    };
+
+                    let cap_w = display_width::of_str(&m.captured_text);
+                    let hint_w = display_width::of_str(&hint);
+
+                    if hint_w > cap_w {
+                        // Hint too wide — return it to the pool and render raw.
+                        if was_popped {
+                            hint_pool.push(hint);
+                        }
+                        cached.push(CachedMatch {
+                            start: m.start, end: m.end,
+                            fmt_offset: None, hint: None,
+                        });
+                        continue;
+                    }
+
+                    // Convert character-based capture offset to byte offset within full match.
+                    let full = &line_str[m.start..m.end];
+                    let fmt_offset = m.captured_offset.map(|(start_ch, len_ch)| {
+                        let byte_start = char_pos_to_byte(full, start_ch);
+                        let byte_len = char_pos_to_byte(&full[byte_start..], len_ch);
+                        (byte_start, byte_len)
+                    });
+
+                    let abs_offset = (li, m.start + m.captured_offset.map(|(s, _)| s).unwrap_or(0));
+                    let target = Target {
+                        text: m.captured_text.clone(),
+                        offset: abs_offset,
+                        source_pane_id: pane_id.clone(),
+                    };
+                    self.target_by_hint.insert(hint.clone(), target);
+
+                    if self.reuse_hints && was_popped {
+                        hint_by_text.insert(m.captured_text, hint.clone());
+                    }
+
+                    cached.push(CachedMatch {
+                        start: m.start, end: m.end,
+                        fmt_offset, hint: Some(hint),
+                    });
+                }
+                pane_cache.push(cached);
+            }
+            cache.push(pane_cache);
         }
-        set.len()
+
+        self.cache = Some(cache);
     }
 
-    fn process_line(&mut self, line: &str, line_index: usize, state: &State) -> String {
-        // Phase 1: collect raw match info from every pattern (no mutation of self).
-        // Borrow slices into `line` rather than allocating per match.
-        struct RawMatch<'a> {
-            start: usize,
-            end:   usize,
-            text:  &'a str,                 // captured group or full match
-            offset: Option<(usize, usize)>, // char-offset of named group within `full`
-        }
-
-        let mut raw: Vec<RawMatch> = Vec::new();
-        for re in &self.compiled {
-            for cap in re.captures_iter(line) {
-                let m = cap.get(0).unwrap();
-                let (text, offset) = extract_capture_info(&cap, m.start());
-                raw.push(RawMatch {
-                    start: m.start(),
-                    end:   m.end(),
-                    text,
-                    offset,
-                });
-            }
-        }
-
-        // Sort by start position; for equal start, prefer the LONGEST match so a full
-        // UUID/URL wins over a sha/digit prefix that begins at the same byte.
-        raw.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
-
-        // Phase 2: build rendered line, processing non-overlapping matches.
+    /// Render one line by walking the precomputed matches. Pure read of cache;
+    /// no regex, no allocation of Targets, no mutation of self.
+    fn render_line(&self, line: &str, line_matches: &[CachedMatch], state: &State) -> String {
         let mut result = String::new();
         let mut last_end = 0usize;
 
-        for m in raw {
-            if m.start < last_end { continue; } // overlapping — skip
+        for m in line_matches {
             result.push_str(&line[last_end..m.start]);
             let full = &line[m.start..m.end];
-            let replacement = self.format_match(
-                full, m.text, m.offset, line_index, m.start, state,
-            );
+
+            let replacement = match &m.hint {
+                None => full.to_string(),
+                Some(hint) => {
+                    if !state.input.is_empty() && !hint.starts_with(&state.input) {
+                        full.to_string()
+                    } else {
+                        self.formatter.format(
+                            hint,
+                            full,
+                            state.selected_hints.contains(hint),
+                            m.fmt_offset,
+                        )
+                    }
+                }
+            };
             result.push_str(&replacement);
             last_end = m.end;
         }
@@ -203,83 +277,9 @@ impl Hinter {
         let styled = format!("{}{}", self.backdrop_style, result);
         expand_tabs(&styled)
     }
-
-    fn format_match(
-        &mut self,
-        full_text: &str,
-        captured_text: &str,
-        relative_offset: Option<(usize, usize)>,
-        line_index: usize,
-        col_offset: usize,
-        state: &State,
-    ) -> String {
-        let absolute_offset = (
-            line_index,
-            col_offset + relative_offset.map(|(s, _)| s).unwrap_or(0),
-        );
-
-        let hint = self.hint_for(captured_text, state);
-
-        // Hint wider than the match can't be inlined — put it back and return raw.
-        if display_width::of_str(&hint) > display_width::of_str(captured_text) {
-            if let Some(ref mut h) = self.hints { h.push(hint); }
-            return full_text.to_string();
-        }
-
-        let target = Target {
-            text: captured_text.to_string(),
-            hint: hint.clone(),
-            offset: absolute_offset,
-            source_pane_id: self.current_pane_id.clone(),
-        };
-        self.target_by_hint.insert(hint.clone(), target.clone());
-        self.target_by_text.insert(captured_text.to_string(), target);
-
-        if !state.input.is_empty() && !hint.starts_with(&state.input) {
-            return full_text.to_string();
-        }
-
-        let fmt_offset = relative_offset.map(|(start_ch, len_ch)| {
-            let byte_start = char_pos_to_byte(full_text, start_ch);
-            let byte_len   = char_pos_to_byte(&full_text[byte_start..], len_ch);
-            (byte_start, byte_len)
-        });
-
-        self.formatter.format(
-            &hint,
-            full_text,
-            state.selected_hints.contains(&hint),
-            fmt_offset,
-        )
-    }
-
-    fn hint_for(&mut self, text: &str, _state: &State) -> String {
-        if self.reuse_hints {
-            if let Some(t) = self.target_by_text.get(text) {
-                return t.hint.clone();
-            }
-        }
-        self.hints
-            .as_mut()
-            .and_then(|h| h.pop())
-            .unwrap_or_else(|| "?".to_string())
-    }
-
-    fn compute_padding(&self, raw_line: &str, width: usize) -> usize {
-        let display_w = display_width::of_str(raw_line);
-        let tab_extra: usize = raw_line.chars().filter(|&c| c == '\t').count() * 7;
-        width.saturating_sub(display_w + tab_extra)
-    }
 }
 
-/// Return the text of the named `match` capture group if present, else the whole match.
-fn primary_text<'a>(cap: &regex::Captures<'a>) -> &'a str {
-    if let Some(m) = cap.name("match") { m.as_str() } else { cap.get(0).unwrap().as_str() }
-}
-
-/// Extract (captured_text, char_offset_within_full_match).
-/// `match_abs_start` is the byte offset of the full match in the original string,
-/// needed to compute the relative offset of the named group.
+/// Return (captured_text, char-offset (start, len) of named group within full match).
 fn extract_capture_info<'h>(
     cap: &regex::Captures<'h>,
     match_abs_start: usize,
@@ -294,6 +294,12 @@ fn extract_capture_info<'h>(
     } else {
         (full, None)
     }
+}
+
+fn compute_padding(raw_line: &str, width: usize) -> usize {
+    let display_w = display_width::of_str(raw_line);
+    let tab_extra: usize = raw_line.chars().filter(|&c| c == '\t').count() * 7;
+    width.saturating_sub(display_w + tab_extra)
 }
 
 fn expand_tabs(s: &str) -> String {
