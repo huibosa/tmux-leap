@@ -145,6 +145,29 @@ Available: `ip` · `uuid` · `sha` · `digit` · `url` · `path` · `hex` ·
 
 See `docs/CONTEXT.md` for the full domain glossary and `docs/adr/` for architectural decisions.
 
+## TODO
+
+Ideas drawn from the hint / quickselect implementations in alacritty, kitty, and wezterm.
+
+### Planned
+
+- **Filter-as-you-type with prefix strip + auto-pick on unique** — render only the *remaining* characters of each label, fire as soon as one label has the typed prefix. (kitty `kittens/hints/main.go`, alacritty `display/hint.rs`)
+- **Extend match dedup to jump mode** — copy/paste already gives identical text one shared hint via `reuse_hints`; jump deliberately doesn't. Decide if a unified hint per unique text is the better default. (wezterm `mux/src/localpane.rs`)
+- **Replace Huffman labels with alphabet-split labels** — same constant-prefix property, no decoder tree, no disk cache at `~/.cache/tmux-leap/`. Behavior change: slightly less optimal label lengths. (alacritty `display/hint.rs`, `HINT_SPLIT_PERCENTAGE`)
+
+### Deferred
+
+- **Atomic-update bracketing** (DECSET 2026) around per-pane TTY writes — small visible benefit since the swap-pane model already isolates rendering. (kitty)
+- **OSC 8 hyperlink wrap** of each hint for mouse-clickable selection — blocked on tmux mouse-event routing. (kitty)
+- **Lazy per-pattern compile** — only force patterns the `RegexSet` actually hits. Marginal at today's pattern counts. (alacritty `config/ui_config.rs`, `LazyRegex`)
+- **Bounded scrollback search** — `viewport ± N lines` cap on regex scope. Defer until scrollback capture (`capture-pane -S -`) is added. (wezterm `quickselect.rs`, `scope_lines`)
+- **`MatchFormatter` rewrite** — single pre-allocated `String` + `write!` instead of a `format!` chain, paired with a match-cursor walk. Revisit if profiling flags it. (alacritty `display/content.rs`, `HintMatches::advance`)
+
+### Known caveats
+
+- **Soft-wrapped matches are split.** A URL wrapping across two visible lines is currently two strings to the regex scanner. Real fix needs `tmux capture-pane -J` plus a byte→cell coordinate map.
+- **Tab columns past column 0 are approximated** in `compute_padding` (8 columns flat instead of `8 - col % 8`). Pre-existing.
+
 ## License
 
 MIT
