@@ -50,7 +50,7 @@ pub fn run(args: StartArgs) {
         return;
     }
 
-    // Enter fingers key table and accept input
+    // Enter leap key table and accept input
     let socket = InputSocket::new().expect("failed to create input socket");
     tmux::exec(&["set-option", "-g", "prefix", "None"]);
     tmux::exec(&["set-option", "-g", "prefix2", "None"]);
@@ -140,11 +140,11 @@ fn patterns_from_option(option: &str, config: &Config) -> Vec<String> {
         .collect()
 }
 
-// ---- HintsSession holds the fingers window and per-pane state ----------------
+// ---- HintsSession holds the leap window and per-pane state ----------------
 
 struct HintsSession {
-    fingers_window: Window,
-    pane_pairs: Vec<(Pane, Pane)>, // (source, fingers)
+    leap_window: Window,
+    pane_pairs: Vec<(Pane, Pane)>, // (source, leap)
     hinter: Hinter,
     pub state: State,
     mode: String,
@@ -168,7 +168,7 @@ impl HintsSession {
             pane::list_panes_in_window(&target_pane.window_id)
         };
 
-        // Create fingers window with one pane
+        // Create leap window with one pane
         let fw = pane::create_window("[leap]", "cat");
 
         // Split to match source pane count (already have 1)
@@ -176,7 +176,7 @@ impl HintsSession {
             pane::split_window(&fw.window_id);
         }
 
-        // Resize fingers window to match source window dimensions
+        // Resize leap window to match source window dimensions
         if !source_panes.is_empty() {
             let source_w = source_panes.iter().map(|p| p.pane_left + p.pane_width).max().unwrap_or(80);
             let source_h = source_panes.iter().map(|p| p.pane_top + p.pane_height).max().unwrap_or(24);
@@ -189,9 +189,9 @@ impl HintsSession {
             pane::select_layout(&fw.window_id, &layout);
         }
 
-        // Pair source ↔ fingers panes by (top, left)
-        let mut fingers_panes = pane::list_panes_in_window(&fw.window_id);
-        let mut pairs = pair_by_position(&source_panes, &fingers_panes);
+        // Pair source ↔ leap panes by (top, left)
+        let mut leap_panes = pane::list_panes_in_window(&fw.window_id);
+        let mut pairs = pair_by_position(&source_panes, &leap_panes);
 
         // Repair any rounding mismatches
         for (src, fng) in &pairs {
@@ -200,8 +200,8 @@ impl HintsSession {
             }
         }
         // Re-fetch after resize
-        fingers_panes = pane::list_panes_in_window(&fw.window_id);
-        pairs = pair_by_position(&source_panes, &fingers_panes);
+        leap_panes = pane::list_panes_in_window(&fw.window_id);
+        pairs = pair_by_position(&source_panes, &leap_panes);
 
         // Build PaneInputs
         let join = mode != "jump";
@@ -239,7 +239,7 @@ impl HintsSession {
         );
 
         HintsSession {
-            fingers_window: fw,
+            leap_window: fw,
             pane_pairs: pairs,
             hinter,
             state: State::default(),
@@ -307,10 +307,12 @@ fn teardown(
         pane::swap_panes(&fng.pane_id, &src.pane_id, zoomed);
     }
 
-    pane::kill_window(&session.fingers_window.window_id);
+    pane::kill_window(&session.leap_window.window_id);
 
     // Restore pane focus (ADR 0003 jump mode vs default).
     // select-pane -Z preserves zoom state on each focus change.
+    // When zoomed we skip the last_pane selection: zoom mode has only one visible
+    // pane, so cycling through last_pane would briefly render the unzoomed layout.
     if mode == "jump" {
         if let Some(target) = matched_target {
             let src = pane::find_pane(&target.source_pane_id)
@@ -318,11 +320,15 @@ fn teardown(
             pane::select_pane(&active_pane.pane_id, zoomed);
             pane::select_pane(&src.pane_id, zoomed);
         } else {
-            pane::select_pane(&saved.last_pane_id, zoomed);
+            if !zoomed {
+                pane::select_pane(&saved.last_pane_id, false);
+            }
             pane::select_pane(&active_pane.pane_id, zoomed);
         }
     } else {
-        pane::select_pane(&saved.last_pane_id, zoomed);
+        if !zoomed {
+            pane::select_pane(&saved.last_pane_id, false);
+        }
         pane::select_pane(&active_pane.pane_id, zoomed);
     }
 
@@ -333,8 +339,8 @@ fn teardown(
     tmux::exec(&["set-option", "-g", "prefix2", &saved.prefix2]);
 }
 
-fn pair_by_position(source: &[Pane], fingers: &[Pane]) -> Vec<(Pane, Pane)> {
-    let fng_by_pos: HashMap<(u32, u32), &Pane> = fingers
+fn pair_by_position(source: &[Pane], leap: &[Pane]) -> Vec<(Pane, Pane)> {
+    let leap_by_pos: HashMap<(u32, u32), &Pane> = leap
         .iter()
         .map(|p| ((p.pane_top, p.pane_left), p))
         .collect();
@@ -342,9 +348,9 @@ fn pair_by_position(source: &[Pane], fingers: &[Pane]) -> Vec<(Pane, Pane)> {
     source
         .iter()
         .filter_map(|src| {
-            fng_by_pos
+            leap_by_pos
                 .get(&(src.pane_top, src.pane_left))
-                .map(|fng| (src.clone(), (*fng).clone()))
+                .map(|lp| (src.clone(), (*lp).clone()))
         })
         .collect()
 }

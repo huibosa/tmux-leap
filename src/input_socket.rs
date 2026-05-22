@@ -33,7 +33,7 @@ impl InputSocket {
     }
 }
 
-/// Send a single-line message to the running fingers socket and return.
+/// Send a single-line message to the running leap socket and return.
 pub fn send(message: &str) -> std::io::Result<()> {
     let path = socket_path();
     let mut stream = UnixStream::connect(&path)?;
