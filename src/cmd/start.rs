@@ -23,7 +23,7 @@ pub fn run(args: StartArgs) {
     }
     let config = config;
 
-    let (active_pane, target_pane) = resolve_pane(&args.pane_id);
+    let (active_pane, target_pane, window_panes) = resolve_pane(&args.pane_id);
 
     let patterns = if let Some(p) = &args.patterns {
         patterns_from_option(p, &config)
@@ -38,6 +38,7 @@ pub fn run(args: StartArgs) {
     let mut session = HintsSession::build(
         &target_pane,
         &active_pane,
+        window_panes,
         &config,
         patterns,
         &args.mode,
@@ -111,20 +112,29 @@ fn capture_tmux_state() -> SavedState {
     }
 }
 
-fn resolve_pane(pane_target: &str) -> (Pane, Pane) {
+/// Returns (active_pane, target_pane, all_panes_in_target_window).
+/// The pane list is fetched in one fork (`list-panes -t <pane_id>` resolves to
+/// the containing window) and reused by HintsSession::build to avoid a second
+/// list-panes call.
+fn resolve_pane(pane_target: &str) -> (Pane, Pane, Vec<Pane>) {
     if pane_target.starts_with('%') {
-        let p = pane::find_pane(pane_target)
+        let panes = pane::list_panes_in_window(pane_target);
+        let active = panes
+            .iter()
+            .find(|p| p.pane_id == pane_target)
+            .cloned()
             .unwrap_or_else(|| panic!("pane not found: {pane_target}"));
-        (p.clone(), p)
+        (active.clone(), active, panes)
     } else {
         let pane_id = tmux::exec(&["display-message", "-t", pane_target, "-p", "#{pane_id}"]);
-        let target = pane::find_pane(&pane_id)
+        let panes = pane::list_panes_in_window(&pane_id);
+        let target = panes
+            .iter()
+            .find(|p| p.pane_id == pane_id)
+            .cloned()
             .unwrap_or_else(|| panic!("pane not found: {pane_id}"));
-        let active = pane::list_panes_in_window(&target.window_id)
-            .into_iter()
-            .find(|_| true) // first active — filtered already
-            .unwrap_or_else(|| target.clone());
-        (active, target)
+        let active = panes.first().cloned().unwrap_or_else(|| target.clone());
+        (active, target, panes)
     }
 }
 
@@ -157,6 +167,7 @@ impl HintsSession {
     fn build(
         target_pane: &Pane,
         active_pane: &Pane,
+        window_panes: Vec<Pane>,
         config: &Config,
         patterns: Vec<String>,
         mode: &str,
@@ -167,7 +178,7 @@ impl HintsSession {
         let source_panes: Vec<Pane> = if zoomed {
             vec![active_pane.clone()]
         } else {
-            pane::list_panes_in_window(&target_pane.window_id)
+            window_panes
         };
 
         // Create leap window with one pane
@@ -197,11 +208,12 @@ impl HintsSession {
 
         // Repair any rounding mismatches. resize_pane does not change pane_id or
         // pane_tty, so the pairs are still valid afterward — no re-list needed.
-        for (src, fng) in &pairs {
-            if src.pane_width != fng.pane_width || src.pane_height != fng.pane_height {
-                pane::resize_pane(&fng.pane_id, src.pane_width, src.pane_height);
-            }
-        }
+        let resizes: Vec<(&str, u32, u32)> = pairs
+            .iter()
+            .filter(|(src, fng)| src.pane_width != fng.pane_width || src.pane_height != fng.pane_height)
+            .map(|(src, fng)| (fng.pane_id.as_str(), src.pane_width, src.pane_height))
+            .collect();
+        pane::resize_pane_batch(&resizes);
 
         // Build PaneInputs
         let join = mode != "jump";

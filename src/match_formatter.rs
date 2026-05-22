@@ -130,24 +130,35 @@ fn chop_from_start(highlight: &str, hint_w: usize) -> String {
 }
 
 fn chop_from_end(highlight: &str, hint_w: usize) -> String {
-    let total_w = display_width::of_str(highlight);
-    let keep_w = if total_w > hint_w { total_w - hint_w } else { 0 };
-    let mut accumulated_w = 0usize;
-    let mut keep_bytes = 0usize;
+    // One pass collecting (cumulative_byte_pos, cumulative_display_w) per char.
+    // Then back-scan to find the largest prefix whose width fits keep_w.
+    // Halves the display_width::of_char calls vs. an of_str + walk approach.
+    let mut byte_pos = 0usize;
+    let mut col = 0usize;
+    let mut prefix: Vec<(usize, usize)> = Vec::with_capacity(highlight.len());
+    prefix.push((0, 0));
     for c in highlight.chars() {
-        let w = display_width::of_char(c);
-        if accumulated_w + w > keep_w {
-            break;
-        }
-        accumulated_w += w;
-        keep_bytes += c.len_utf8();
+        byte_pos += c.len_utf8();
+        col += display_width::of_char(c);
+        prefix.push((byte_pos, col));
     }
-    let padding = if keep_w > accumulated_w {
-        " ".repeat(keep_w - accumulated_w)
-    } else {
-        String::new()
-    };
-    format!("{}{}", &highlight[..keep_bytes], padding)
+    let total_w = col;
+    let keep_w = total_w.saturating_sub(hint_w);
+
+    let (keep_bytes, accumulated_w) = prefix
+        .iter()
+        .rev()
+        .find(|&&(_, w)| w <= keep_w)
+        .copied()
+        .unwrap_or((0, 0));
+
+    let pad_n = keep_w - accumulated_w;
+    let mut out = String::with_capacity(keep_bytes + pad_n);
+    out.push_str(&highlight[..keep_bytes]);
+    for _ in 0..pad_n {
+        out.push(' ');
+    }
+    out
 }
 
 #[cfg(test)]

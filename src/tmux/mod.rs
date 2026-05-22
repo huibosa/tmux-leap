@@ -9,7 +9,7 @@ pub fn exec(args: &[&str]) -> String {
         .args(args)
         .output()
         .unwrap_or_else(|e| panic!("tmux exec failed: {e}"));
-    String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string()
+    finalize_stdout(out.stdout)
 }
 
 /// Run several tmux subcommands in a single fork, separated by `;` arguments.
@@ -40,6 +40,16 @@ pub fn exec_stdin(args: &[&str], input: &[u8]) -> String {
         stdin.write_all(input).ok();
     }
     let out = child.wait_with_output().expect("tmux wait failed");
-    String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string()
+    finalize_stdout(out.stdout)
+}
+
+/// Convert a tmux stdout buffer to a String, dropping trailing newlines in place.
+/// Avoids the extra alloc that `from_utf8_lossy(...).to_string()` would introduce.
+fn finalize_stdout(bytes: Vec<u8>) -> String {
+    let mut s = String::from_utf8(bytes)
+        .unwrap_or_else(|e| String::from_utf8_lossy(&e.into_bytes()).into_owned());
+    let trimmed_len = s.trim_end_matches('\n').len();
+    s.truncate(trimmed_len);
+    s
 }
 

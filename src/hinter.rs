@@ -317,9 +317,13 @@ fn extract_capture_info<'h>(
 }
 
 fn compute_padding(raw_line: &str, width: usize) -> usize {
-    let display_w = display_width::of_str(raw_line);
-    let tab_extra: usize = raw_line.chars().filter(|&c| c == '\t').count() * 7;
-    width.saturating_sub(display_w + tab_extra)
+    // Single pass: width counted as 8 columns per tab (matches expand_tabs at col 0;
+    // close enough for typical shell output) plus display_width for everything else.
+    let mut total = 0usize;
+    for c in raw_line.chars() {
+        total += if c == '\t' { 8 } else { display_width::of_char(c) };
+    }
+    width.saturating_sub(total)
 }
 
 fn expand_tabs(s: &str) -> String {

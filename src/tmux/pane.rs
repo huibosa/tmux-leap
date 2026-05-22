@@ -163,6 +163,32 @@ pub fn resize_pane(pane_id: &str, w: u32, h: u32) {
     exec(&["resize-pane", "-t", pane_id, "-x", &ws, "-y", &hs]);
 }
 
+/// Run several resize-pane operations in a single tmux invocation.
+pub fn resize_pane_batch(resizes: &[(&str, u32, u32)]) {
+    match resizes.len() {
+        0 => return,
+        1 => return resize_pane(resizes[0].0, resizes[0].1, resizes[0].2),
+        _ => {}
+    }
+    // Format width/height into owned strings whose lifetimes outlive `args`.
+    let dims: Vec<(String, String)> = resizes
+        .iter()
+        .map(|(_, w, h)| (w.to_string(), h.to_string()))
+        .collect();
+    let mut args: Vec<&str> = Vec::with_capacity(resizes.len() * 8);
+    for (i, ((id, _, _), (ws, hs))) in resizes.iter().zip(dims.iter()).enumerate() {
+        if i > 0 { args.push(";"); }
+        args.push("resize-pane");
+        args.push("-t");
+        args.push(id);
+        args.push("-x");
+        args.push(ws);
+        args.push("-y");
+        args.push(hs);
+    }
+    exec(&args);
+}
+
 pub fn select_pane(id: &str, zoomed: bool) {
     if zoomed {
         exec(&["select-pane", "-Z", "-t", id]);
