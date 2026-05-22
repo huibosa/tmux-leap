@@ -1,0 +1,350 @@
+use crate::action_runner::ActionRunner;
+use crate::cli::StartArgs;
+use crate::config::Config;
+use crate::hinter::{Hinter, PaneInput, Target};
+use crate::input_socket::InputSocket;
+use crate::match_formatter::MatchFormatter;
+use crate::state::State;
+use crate::tmux::pane::{self, Pane, Window};
+use crate::tmux;
+use crate::view::View;
+use std::collections::HashMap;
+
+pub fn run(args: StartArgs) {
+    let mut config = Config::load();
+    // Bootstrap: if load-config has never run, alphabet and patterns will be empty.
+    if config.alphabet.is_empty() {
+        config.alphabet = Config::alphabet_for_layout(&config.keyboard_layout);
+    }
+    if config.patterns.is_empty() {
+        for (name, pat) in crate::config::BUILTIN_PATTERNS {
+            config.patterns.insert(name.to_string(), pat.to_string());
+        }
+    }
+    let config = config;
+
+    let (active_pane, target_pane) = resolve_pane(&args.pane_id);
+
+    let patterns = if let Some(p) = &args.patterns {
+        patterns_from_option(p, &config)
+    } else {
+        config.patterns.values().cloned().collect()
+    };
+
+    // Capture tmux state before we take over key bindings
+    let saved = capture_tmux_state();
+
+    // Build and display the hints window
+    let mut session = HintsSession::build(
+        &target_pane,
+        &active_pane,
+        &config,
+        patterns,
+        &args.mode,
+    );
+
+    session.render_all();
+
+    if args.mode == "benchmark" {
+        teardown(session, &saved, &active_pane, &args.mode, None);
+        return;
+    }
+
+    // Enter fingers key table and accept input
+    let socket = InputSocket::new().expect("failed to create input socket");
+    tmux::exec(&["set-option", "-g", "prefix", "None"]);
+    tmux::exec(&["set-option", "-g", "prefix2", "None"]);
+    tmux::exec(&["set-window-option", "key-table", "leap"]);
+    tmux::exec(&["switch-client", "-T", "leap"]);
+
+    let matched = session.input_loop(&socket, &config);
+
+    socket.close();
+
+    // Run the action if a match was made
+    if let Some((target, result)) = &matched {
+        let src_pane = pane::find_pane(&target.source_pane_id)
+            .unwrap_or_else(|| active_pane.clone());
+        ActionRunner {
+            modifier: &session.state.modifier,
+            match_text: result,
+            hint: &session.state.input,
+            active_pane: &active_pane,
+            source_pane: &src_pane,
+            offset: Some(target.offset),
+            mode: &args.mode,
+            main_action: args.main_action.as_deref(),
+            ctrl_action: args.ctrl_action.as_deref(),
+            alt_action: args.alt_action.as_deref(),
+            shift_action: args.shift_action.as_deref(),
+            config: &config,
+        }
+        .run();
+    }
+
+    teardown(session, &saved, &active_pane, &args.mode, matched.as_ref().map(|(t, _)| t));
+}
+
+struct SavedState {
+    last_pane_id: String,
+    last_key_table: String,
+    prefix: String,
+    prefix2: String,
+}
+
+fn capture_tmux_state() -> SavedState {
+    let out = tmux::exec(&[
+        "display-message", "-t", "{last}", "-p",
+        "#{pane_id};#{client_key_table};#{prefix};#{prefix2}",
+    ]);
+    let parts: Vec<&str> = out.splitn(4, ';').collect();
+    SavedState {
+        last_pane_id: parts.get(0).unwrap_or(&"").to_string(),
+        last_key_table: {
+            let t = parts.get(1).unwrap_or(&"");
+            if t.is_empty() { "root".to_string() } else { t.to_string() }
+        },
+        prefix: parts.get(2).unwrap_or(&"").to_string(),
+        prefix2: parts.get(3).unwrap_or(&"").to_string(),
+    }
+}
+
+fn resolve_pane(pane_target: &str) -> (Pane, Pane) {
+    if pane_target.starts_with('%') {
+        let p = pane::find_pane(pane_target)
+            .unwrap_or_else(|| panic!("pane not found: {pane_target}"));
+        (p.clone(), p)
+    } else {
+        let pane_id = tmux::exec(&["display-message", "-t", pane_target, "-p", "#{pane_id}"]);
+        let target = pane::find_pane(&pane_id)
+            .unwrap_or_else(|| panic!("pane not found: {pane_id}"));
+        let active = pane::list_panes_in_window(&target.window_id)
+            .into_iter()
+            .find(|_| true) // first active — filtered already
+            .unwrap_or_else(|| target.clone());
+        (active, target)
+    }
+}
+
+fn patterns_from_option(option: &str, config: &Config) -> Vec<String> {
+    option
+        .split(',')
+        .filter_map(|name| {
+            if let Some(p) = config.patterns.get(name.trim()) {
+                Some(p.clone())
+            } else {
+                eprintln!("[tmux-leap] unknown pattern: {name}");
+                None
+            }
+        })
+        .collect()
+}
+
+// ---- HintsSession holds the fingers window and per-pane state ----------------
+
+struct HintsSession {
+    fingers_window: Window,
+    pane_pairs: Vec<(Pane, Pane)>, // (source, fingers)
+    hinter: Hinter,
+    pub state: State,
+    mode: String,
+    zoomed: bool,
+}
+
+impl HintsSession {
+    fn build(
+        target_pane: &Pane,
+        active_pane: &Pane,
+        config: &Config,
+        patterns: Vec<String>,
+        mode: &str,
+    ) -> HintsSession {
+        let zoomed = target_pane.window_zoomed_flag;
+
+        // ADR 0001/0002: If zoomed, only the active pane; otherwise all panes in window.
+        let source_panes: Vec<Pane> = if zoomed {
+            vec![active_pane.clone()]
+        } else {
+            pane::list_panes_in_window(&target_pane.window_id)
+        };
+
+        // Create fingers window with one pane
+        let fw = pane::create_window("[leap]", "cat");
+
+        // Split to match source pane count (already have 1)
+        for _ in 1..source_panes.len() {
+            pane::split_window(&fw.window_id);
+        }
+
+        // Resize fingers window to match source window dimensions
+        if !source_panes.is_empty() {
+            let source_w = source_panes.iter().map(|p| p.pane_left + p.pane_width).max().unwrap_or(80);
+            let source_h = source_panes.iter().map(|p| p.pane_top + p.pane_height).max().unwrap_or(24);
+            pane::resize_window(&fw.window_id, source_w, source_h);
+        }
+
+        // Mirror layout for multi-pane (ADR 0004)
+        if source_panes.len() > 1 {
+            let layout = tmux::exec(&["display-message", "-t", &target_pane.window_id, "-p", "#{window_layout}"]);
+            pane::select_layout(&fw.window_id, &layout);
+        }
+
+        // Pair source ↔ fingers panes by (top, left)
+        let mut fingers_panes = pane::list_panes_in_window(&fw.window_id);
+        let mut pairs = pair_by_position(&source_panes, &fingers_panes);
+
+        // Repair any rounding mismatches
+        for (src, fng) in &pairs {
+            if src.pane_width != fng.pane_width || src.pane_height != fng.pane_height {
+                pane::resize_pane(&fng.pane_id, src.pane_width, src.pane_height);
+            }
+        }
+        // Re-fetch after resize
+        fingers_panes = pane::list_panes_in_window(&fw.window_id);
+        pairs = pair_by_position(&source_panes, &fingers_panes);
+
+        // Build PaneInputs
+        let join = mode != "jump";
+        let pane_inputs: Vec<PaneInput> = pairs
+            .iter()
+            .map(|(src, fng)| {
+                let content = pane::capture_pane(src, join);
+                let lines: Vec<String> = content.lines().map(str::to_string).collect();
+                PaneInput {
+                    lines,
+                    pane_id: src.pane_id.clone(),
+                    width: src.pane_width as usize,
+                    tty_path: fng.pane_tty.clone(),
+                }
+            })
+            .collect();
+
+        let formatter = MatchFormatter::new(
+            config.hint_style.clone(),
+            config.selected_hint_style.clone(),
+            config.highlight_style.clone(),
+            config.selected_highlight_style.clone(),
+            config.backdrop_style.clone(),
+            config.hint_position.clone(),
+        );
+
+        let hinter = Hinter::new(
+            pane_inputs,
+            patterns,
+            config.alphabet.clone(),
+            formatter,
+            mode != "jump",
+            config.backdrop_style.clone(),
+            &State::default(),
+        );
+
+        HintsSession {
+            fingers_window: fw,
+            pane_pairs: pairs,
+            hinter,
+            state: State::default(),
+            mode: mode.to_string(),
+            zoomed,
+        }
+    }
+
+    fn render_all(&mut self) {
+        // ADR 0002/0004: zoomed → swap first, then render
+        if self.zoomed {
+            for (src, fng) in &self.pane_pairs {
+                pane::swap_panes(&fng.pane_id, &src.pane_id, true);
+            }
+            let _ = self.hinter.run(&self.state);
+        } else {
+            let _ = self.hinter.run(&self.state);
+            for (src, fng) in &self.pane_pairs {
+                pane::swap_panes(&fng.pane_id, &src.pane_id, false);
+            }
+        }
+    }
+
+    fn input_loop(
+        &mut self,
+        socket: &InputSocket,
+        _config: &Config,
+    ) -> Option<(Target, String)> {
+        loop {
+            match socket.recv() {
+                Ok(input) => {
+                    let mut view = View::new(&mut self.hinter, &mut self.state, self.mode.clone());
+                    view.process_input(&input);
+                    if self.state.exiting {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("tmux-leap: socket error: {e}");
+                    break;
+                }
+            }
+        }
+        if !self.state.result.is_empty() {
+            let target = self.state.matched_target.clone()?;
+            Some((target, self.state.result.clone()))
+        } else {
+            None
+        }
+    }
+}
+
+fn teardown(
+    session: HintsSession,
+    saved: &SavedState,
+    active_pane: &Pane,
+    mode: &str,
+    matched_target: Option<&Target>,
+) {
+    let zoomed = session.zoomed;
+
+    // Swap each pair back (reverse order).
+    // Pass zoomed so swap-pane -Z preserves the zoom state (ADR 0002).
+    for (src, fng) in session.pane_pairs.iter().rev() {
+        pane::swap_panes(&fng.pane_id, &src.pane_id, zoomed);
+    }
+
+    pane::kill_window(&session.fingers_window.window_id);
+
+    // Restore pane focus (ADR 0003 jump mode vs default).
+    // select-pane -Z preserves zoom state on each focus change.
+    if mode == "jump" {
+        if let Some(target) = matched_target {
+            let src = pane::find_pane(&target.source_pane_id)
+                .unwrap_or_else(|| active_pane.clone());
+            pane::select_pane(&active_pane.pane_id, zoomed);
+            pane::select_pane(&src.pane_id, zoomed);
+        } else {
+            pane::select_pane(&saved.last_pane_id, zoomed);
+            pane::select_pane(&active_pane.pane_id, zoomed);
+        }
+    } else {
+        pane::select_pane(&saved.last_pane_id, zoomed);
+        pane::select_pane(&active_pane.pane_id, zoomed);
+    }
+
+    // Restore key table and prefixes
+    tmux::exec(&["set-window-option", "key-table", &saved.last_key_table]);
+    tmux::exec(&["switch-client", "-T", &saved.last_key_table]);
+    tmux::exec(&["set-option", "-g", "prefix", &saved.prefix]);
+    tmux::exec(&["set-option", "-g", "prefix2", &saved.prefix2]);
+}
+
+fn pair_by_position(source: &[Pane], fingers: &[Pane]) -> Vec<(Pane, Pane)> {
+    let fng_by_pos: HashMap<(u32, u32), &Pane> = fingers
+        .iter()
+        .map(|p| ((p.pane_top, p.pane_left), p))
+        .collect();
+
+    source
+        .iter()
+        .filter_map(|src| {
+            fng_by_pos
+                .get(&(src.pane_top, src.pane_left))
+                .map(|fng| (src.clone(), (*fng).clone()))
+        })
+        .collect()
+}
