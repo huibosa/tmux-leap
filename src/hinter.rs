@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use regex::Regex;
+use regex::{Regex, RegexSet};
 
 use crate::hint::huffman;
 use crate::display_width;
@@ -23,6 +23,10 @@ pub struct Hinter {
     /// avoiding the duplicate-name error the `regex` crate throws when
     /// multiple patterns each contain `(?P<match>...)` and are joined with `|`.
     compiled: Vec<Regex>,
+    /// Combined RegexSet for one-pass per-line membership testing. Lines that
+    /// match no patterns are skipped entirely; otherwise only patterns the set
+    /// reports as matching are scanned for captures.
+    set: RegexSet,
     alphabet: Vec<String>,
     formatter: MatchFormatter,
     reuse_hints: bool,
@@ -61,13 +65,20 @@ impl Hinter {
         backdrop_style: String,
         _state: &State,
     ) -> Self {
-        let compiled: Vec<Regex> = patterns
-            .into_iter()
-            .filter_map(|p| Regex::new(&p).ok())
-            .collect();
+        // Validate each pattern once; keep RegexSet and Vec<Regex> aligned by index.
+        let mut compiled: Vec<Regex> = Vec::with_capacity(patterns.len());
+        let mut sources: Vec<String> = Vec::with_capacity(patterns.len());
+        for p in patterns {
+            if let Ok(re) = Regex::new(&p) {
+                compiled.push(re);
+                sources.push(p);
+            }
+        }
+        let set = RegexSet::new(&sources).expect("patterns already validated");
         Hinter {
             pane_inputs,
             compiled,
+            set,
             alphabet,
             formatter,
             reuse_hints,
@@ -132,8 +143,17 @@ impl Hinter {
         for input in &self.pane_inputs {
             let mut per_line: Vec<Vec<PreMatch>> = Vec::with_capacity(input.lines.len());
             for line in &input.lines {
+                // One DFA pass tells us which patterns can possibly match this line.
+                // Most lines match nothing → we skip the per-pattern capture scan entirely.
+                let set_matches = self.set.matches(line);
+                if !set_matches.matched_any() {
+                    per_line.push(Vec::new());
+                    continue;
+                }
+
                 let mut raw: Vec<(usize, usize, String, Option<(usize, usize)>)> = Vec::new();
-                for re in &self.compiled {
+                for idx in set_matches.iter() {
+                    let re = &self.compiled[idx];
                     for cap in re.captures_iter(line) {
                         let m = cap.get(0).unwrap();
                         let (text, offset) = extract_capture_info(&cap, m.start());
