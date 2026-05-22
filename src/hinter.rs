@@ -66,12 +66,14 @@ impl Hinter {
         _state: &State,
     ) -> Self {
         // Validate each pattern once; keep RegexSet and Vec<Regex> aligned by index.
+        // Smart-case: a pattern with no ASCII uppercase becomes case-insensitive.
         let mut compiled: Vec<Regex> = Vec::with_capacity(patterns.len());
         let mut sources: Vec<String> = Vec::with_capacity(patterns.len());
         for p in patterns {
-            if let Ok(re) = Regex::new(&p) {
+            let src = apply_smart_case(&p);
+            if let Ok(re) = Regex::new(&src) {
                 compiled.push(re);
-                sources.push(p);
+                sources.push(src);
             }
         }
         let set = RegexSet::new(&sources).expect("patterns already validated");
@@ -157,7 +159,16 @@ impl Hinter {
                     for cap in re.captures_iter(line) {
                         let m = cap.get(0).unwrap();
                         let (text, offset) = extract_capture_info(&cap, m.start());
-                        raw.push((m.start(), m.end(), text.to_string(), offset));
+                        // Trim trailing punctuation only when the user's regex didn't
+                        // pin the match shape with a named (?P<match>...) group.
+                        let (end, text) = if offset.is_some() {
+                            (m.end(), text.to_string())
+                        } else {
+                            let trimmed = trim_trailing(text);
+                            (m.start() + trimmed.len(), trimmed.to_string())
+                        };
+                        if end <= m.start() { continue; }
+                        raw.push((m.start(), end, text, offset));
                     }
                 }
                 // start ASC, end DESC — longest wins at same start position.
@@ -344,4 +355,102 @@ fn expand_tabs(s: &str) -> String {
 
 fn char_pos_to_byte(s: &str, char_pos: usize) -> usize {
     s.char_indices().nth(char_pos).map(|(b, _)| b).unwrap_or(s.len())
+}
+
+/// Prefix `(?i)` to a pattern that contains no ASCII-uppercase letter, so that
+/// `URL`/`Sha`/etc. match alongside their lowercase form. Patterns the user
+/// wrote with explicit capitals are left case-sensitive.
+fn apply_smart_case(p: &str) -> String {
+    if p.bytes().any(|b| b.is_ascii_uppercase()) {
+        p.to_string()
+    } else {
+        format!("(?i){}", p)
+    }
+}
+
+/// Strip trailing sentence punctuation and unbalanced closing brackets from a
+/// match. Operates byte-wise on ASCII; non-ASCII bytes (UTF-8 continuations,
+/// CJK, etc.) never match a trim target so multi-byte sequences are preserved.
+fn trim_trailing(text: &str) -> &str {
+    let mut s = text;
+    loop {
+        let bytes = s.as_bytes();
+        let Some(&last) = bytes.last() else { break };
+        let opener = match last {
+            b'.' | b',' | b';' | b':' | b'?' | b'!' => {
+                s = &s[..s.len() - 1];
+                continue;
+            }
+            b')' => b'(',
+            b']' => b'[',
+            b'}' => b'{',
+            b'>' => b'<',
+            _ => break,
+        };
+        let head = &bytes[..bytes.len() - 1];
+        let opens = head.iter().filter(|&&b| b == opener).count();
+        let closes = head.iter().filter(|&&b| b == last).count();
+        if closes >= opens {
+            s = &s[..s.len() - 1];
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn smart_case_lowers_only_pattern() {
+        assert_eq!(apply_smart_case("foo"), "(?i)foo");
+        assert_eq!(apply_smart_case(r"[0-9a-f]+"), "(?i)[0-9a-f]+");
+    }
+
+    #[test]
+    fn smart_case_preserves_pattern_with_uppercase() {
+        assert_eq!(apply_smart_case(r"[a-fA-F]+"), r"[a-fA-F]+");
+        assert_eq!(apply_smart_case("Foo"), "Foo");
+    }
+
+    #[test]
+    fn smart_case_compiles_and_matches() {
+        let re = Regex::new(&apply_smart_case("modified")).unwrap();
+        assert!(re.is_match("Modified: foo.rs"));
+        assert!(re.is_match("modified"));
+    }
+
+    #[test]
+    fn trim_strips_trailing_sentence_punct() {
+        assert_eq!(trim_trailing("https://x.com/a."), "https://x.com/a");
+        assert_eq!(trim_trailing("foo,"), "foo");
+        assert_eq!(trim_trailing("end!?."), "end");
+    }
+
+    #[test]
+    fn trim_strips_unbalanced_closer() {
+        assert_eq!(trim_trailing("https://x.com/a)"), "https://x.com/a");
+        assert_eq!(trim_trailing("path/foo]"), "path/foo");
+    }
+
+    #[test]
+    fn trim_keeps_balanced_closer() {
+        assert_eq!(trim_trailing("foo(bar)"), "foo(bar)");
+        assert_eq!(trim_trailing("[a]"), "[a]");
+    }
+
+    #[test]
+    fn trim_keeps_clean_text() {
+        assert_eq!(trim_trailing("https://x.com/a"), "https://x.com/a");
+        assert_eq!(trim_trailing(""), "");
+    }
+
+    #[test]
+    fn trim_preserves_non_ascii_tail() {
+        // A trailing wide character must not be split by byte-wise trim.
+        let s = "https://x.com/日本語";
+        assert_eq!(trim_trailing(s), s);
+    }
 }
