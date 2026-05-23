@@ -40,7 +40,11 @@ pub struct Hinter {
 #[derive(Debug, Clone)]
 pub struct Target {
     pub text: String,
-    pub offset: (usize, usize), // (line_index, col)
+    /// Cursor target as visible line index and the number of tmux copy-mode
+    /// `cursor-right` steps needed from the start of that line. This is a
+    /// character offset, not a byte offset: copy-mode jumps over wide
+    /// characters and tabs in a single `cursor-right` command.
+    pub offset: (usize, usize),
     pub source_pane_id: String,
 }
 
@@ -271,7 +275,9 @@ impl Hinter {
                         (byte_start, byte_len)
                     });
 
-                    let abs_offset = (li, m.start + m.captured_offset.map(|(s, _)| s).unwrap_or(0));
+                    let target_byte_start = m.start + fmt_offset.map(|(s, _)| s).unwrap_or(0);
+                    let cursor_right_steps = copy_mode_cursor_steps(&line_str[..target_byte_start]);
+                    let abs_offset = (li, cursor_right_steps);
                     let target = Target {
                         text: m.captured_text.clone(),
                         offset: abs_offset,
@@ -380,6 +386,10 @@ fn char_pos_to_byte(s: &str, char_pos: usize) -> usize {
     s.char_indices().nth(char_pos).map(|(b, _)| b).unwrap_or(s.len())
 }
 
+fn copy_mode_cursor_steps(s: &str) -> usize {
+    s.chars().filter(|&c| display_width::of_char(c) > 0).count()
+}
+
 /// Prefix `(?i)` to a pattern that contains no ASCII-uppercase letter, so that
 /// `URL`/`Sha`/etc. match alongside their lowercase form. Patterns the user
 /// wrote with explicit capitals are left case-sensitive.
@@ -425,6 +435,44 @@ fn trim_trailing(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn formatter() -> MatchFormatter {
+        MatchFormatter::new(
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            "left".into(),
+        )
+    }
+
+    fn one_line_offset(line: &str, pattern: &str) -> (usize, usize) {
+        let mut hinter = Hinter::new(
+            vec![PaneInput {
+                lines: vec![line.to_string()],
+                pane_id: "%1".into(),
+                width: 80,
+                tty_path: "/dev/null".into(),
+            }],
+            vec![pattern.to_string()],
+            vec!["a".into()],
+            formatter(),
+            false,
+            String::new(),
+            &State::default(),
+        );
+        hinter.precompute();
+        hinter.lookup("a").expect("target assigned").offset
+    }
+
+    #[test]
+    fn target_offset_uses_copy_mode_cursor_steps_not_bytes() {
+        assert_eq!(one_line_offset("日 12345", r"\d+"), (0, 2));
+        assert_eq!(one_line_offset("\t12345", r"\d+"), (0, 1));
+        assert_eq!(one_line_offset("⚠️ 12345", r"\d+"), (0, 2));
+        assert_eq!(one_line_offset("日 id=12345", r"id=(?P<match>\d+)"), (0, 5));
+    }
 
     #[test]
     fn smart_case_lowers_only_pattern() {

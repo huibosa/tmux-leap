@@ -91,7 +91,7 @@ impl<'a> ActionRunner<'a> {
     fn paste_command(&self) -> String {
         if self.active_pane.pane_in_mode {
             format!(
-                "tmux send-keys -t {} -X cancel ; tmux paste-buffer -t {}",
+                "tmux send-keys -t {} -X cancel ; paste-buffer -t {}",
                 self.active_pane.pane_id, self.active_pane.pane_id
             )
         } else {
@@ -102,13 +102,19 @@ impl<'a> ActionRunner<'a> {
     fn jump_command(&self) -> Option<String> {
         let (line, col) = self.offset?;
         let src = &self.source_pane.pane_id;
-        Some(format!(
+        let mut cmd = format!(
             "tmux select-pane -t {src} ; \
-             tmux copy-mode -t {src} ; \
-             tmux send-keys -t {src} -X top-line ; \
-             tmux send-keys -t {src} -N {line} -X cursor-down ; \
-             tmux send-keys -t {src} -N {col} -X cursor-right",
-        ))
+             copy-mode -t {src} ; \
+             send-keys -t {src} -X top-line ; \
+             send-keys -t {src} -X start-of-line",
+        );
+        if line > 0 {
+            cmd.push_str(&format!(" ; send-keys -t {src} -N {line} -X cursor-down"));
+        }
+        if col > 0 {
+            cmd.push_str(&format!(" ; send-keys -t {src} -N {col} -X cursor-right"));
+        }
+        Some(cmd)
     }
 
     fn system_copy_command(&self) -> Option<String> {
@@ -180,4 +186,93 @@ fn shell_split(s: &str) -> Vec<String> {
         parts.push(current);
     }
     parts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pane(id: &str, in_mode: bool) -> Pane {
+        Pane {
+            pane_id: id.to_string(),
+            window_id: "@1".into(),
+            pane_width: 80,
+            pane_height: 24,
+            pane_left: 0,
+            pane_top: 0,
+            pane_current_path: "/tmp".into(),
+            pane_in_mode: in_mode,
+            scroll_position: None,
+            window_zoomed_flag: false,
+            pane_tty: "/dev/null".into(),
+        }
+    }
+
+    fn runner<'a>(
+        active_pane: &'a Pane,
+        source_pane: &'a Pane,
+        config: &'a Config,
+        mode: &'a str,
+        offset: Option<(usize, usize)>,
+    ) -> ActionRunner<'a> {
+        ActionRunner {
+            modifier: "main",
+            match_text: "match",
+            hint: "a",
+            active_pane,
+            source_pane,
+            offset,
+            mode,
+            main_action: None,
+            ctrl_action: None,
+            alt_action: None,
+            shift_action: None,
+            config,
+        }
+    }
+
+    #[test]
+    fn jump_command_is_one_tmux_batch_without_nested_tmux_commands() {
+        let active = pane("%1", false);
+        let source = pane("%2", false);
+        let config = Config::default();
+        let command = runner(&active, &source, &config, "jump", Some((2, 3)))
+            .jump_command()
+            .unwrap();
+
+        let parts = shell_split(&command);
+        assert_eq!(parts.iter().filter(|p| p.as_str() == "tmux").count(), 1);
+        assert!(!parts.windows(2).any(|w| w[0] == ";" && w[1] == "tmux"));
+        assert!(parts.windows(5).any(|w| w == ["copy-mode", "-t", "%2", ";", "send-keys"]));
+        assert!(parts.windows(6).any(|w| w == ["-N", "2", "-X", "cursor-down", ";", "send-keys"]));
+        assert!(parts.windows(4).any(|w| w == ["-N", "3", "-X", "cursor-right"]));
+    }
+
+    #[test]
+    fn jump_command_omits_zero_repeat_counts() {
+        let active = pane("%1", false);
+        let source = pane("%2", false);
+        let config = Config::default();
+        let command = runner(&active, &source, &config, "jump", Some((0, 0)))
+            .jump_command()
+            .unwrap();
+
+        assert!(!shell_split(&command).windows(2).any(|w| w == ["-N", "0"]));
+        assert!(command.contains("copy-mode"));
+        assert!(command.contains("top-line"));
+        assert!(command.contains("start-of-line"));
+    }
+
+    #[test]
+    fn paste_from_copy_mode_is_one_tmux_batch_without_nested_tmux_commands() {
+        let active = pane("%1", true);
+        let source = pane("%2", false);
+        let config = Config::default();
+        let command = runner(&active, &source, &config, "default", None).paste_command();
+
+        let parts = shell_split(&command);
+        assert_eq!(parts.iter().filter(|p| p.as_str() == "tmux").count(), 1);
+        assert!(!parts.windows(2).any(|w| w[0] == ";" && w[1] == "tmux"));
+        assert!(parts.windows(4).any(|w| w == [";", "paste-buffer", "-t", "%1"]));
+    }
 }
