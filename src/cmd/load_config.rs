@@ -112,7 +112,15 @@ fn setup_root_bindings(cli: &str, config: &Config) {
 }
 
 fn setup_leap_mode_bindings(cli: &str) {
+    for (key, cmd) in leap_mode_bindings(cli) {
+        leap_bind(&key, &cmd);
+    }
+}
+
+fn leap_mode_bindings(cli: &str) -> Vec<(String, String)> {
     const DISALLOWED: &[char] = &['c', 'i', 'm', 'q', 'n'];
+    let mut bindings = Vec::new();
+
     for c in 'a'..='z' {
         if DISALLOWED.contains(&c) {
             continue;
@@ -121,24 +129,92 @@ fn setup_leap_mode_bindings(cli: &str) {
         let upper = c.to_uppercase().to_string();
         let ctrl = format!("C-{c}");
         let alt = format!("M-{c}");
-        leap_bind(&lower, &format!("{cli} send-input hint:{lower}:main"));
-        leap_bind(&upper, &format!("{cli} send-input hint:{lower}:shift"));
-        leap_bind(&ctrl,  &format!("{cli} send-input hint:{lower}:ctrl"));
-        leap_bind(&alt,   &format!("{cli} send-input hint:{lower}:alt"));
+        bindings.push((lower.clone(), format!("{cli} send-input hint:{lower}:main")));
+        bindings.push((upper, format!("{cli} send-input hint:{lower}:shift")));
+        bindings.push((ctrl, format!("{cli} send-input hint:{lower}:ctrl")));
+        bindings.push((alt, format!("{cli} send-input hint:{lower}:alt")));
     }
-    leap_bind("C-c",    &format!("{cli} send-input exit"));
-    leap_bind("q",      &format!("{cli} send-input exit"));
-    leap_bind("Escape", &format!("{cli} send-input exit"));
-    leap_bind("Enter",  &format!("{cli} send-input noop"));
-    leap_bind("Any",    &format!("{cli} send-input noop"));
+
+    bindings.push(("Tab".into(), format!("{cli} send-input toggle-multi-mode")));
+    bindings.push(("C-c".into(), format!("{cli} send-input exit")));
+    bindings.push(("q".into(), format!("{cli} send-input exit")));
+    bindings.push(("Escape".into(), format!("{cli} send-input exit")));
+    bindings.push(("Enter".into(), format!("{cli} send-input noop")));
+    bindings.push(("Any".into(), format!("{cli} send-input noop")));
+    bindings
 }
 
 fn leap_bind(key: &str, cmd: &str) {
-    crate::tmux::exec(&["bind-key", "-Tleap", key, "run-shell", "-b", cmd]);
+    let args = leap_bind_args(key, cmd);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    crate::tmux::exec(&args);
+}
+
+fn leap_bind_args(key: &str, cmd: &str) -> Vec<String> {
+    // Do not use `run-shell -b` here. Leap inputs are stateful: `Tab` must be
+    // processed before the following hint key, and multi-character hints must
+    // arrive in order. A foreground `run-shell` keeps tmux's command queue
+    // ordered while `tmux-leap send-input` runs (normally just a Unix socket write).
+    vec![
+        "bind-key".into(),
+        "-Tleap".into(),
+        key.into(),
+        "run-shell".into(),
+        cmd.into(),
+    ]
 }
 
 fn option_to_method(option: &str) -> String {
     option
         .trim_start_matches("@leap-")
         .replace('-', "_")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leap_mode_binds_tab_to_multi_select_toggle() {
+        let bindings = leap_mode_bindings("tmux-leap");
+
+        assert!(
+            bindings
+                .iter()
+                .any(|(key, cmd)| key == "Tab" && cmd == "tmux-leap send-input toggle-multi-mode"),
+            "Tab must toggle multi-select mode instead of falling through to Any/noop"
+        );
+    }
+
+    #[test]
+    fn leap_mode_binds_tab_before_any_noop() {
+        let bindings = leap_mode_bindings("tmux-leap");
+        let tab_pos = bindings.iter().position(|(key, _)| key == "Tab").unwrap();
+        let any_pos = bindings.iter().position(|(key, _)| key == "Any").unwrap();
+
+        assert!(
+            tab_pos < any_pos,
+            "Tab binding should be installed before Any/noop"
+        );
+    }
+
+    #[test]
+    fn leap_input_bindings_run_synchronously_to_preserve_order() {
+        let args = leap_bind_args("Tab", "tmux-leap send-input toggle-multi-mode");
+
+        assert_eq!(
+            args,
+            vec![
+                "bind-key",
+                "-Tleap",
+                "Tab",
+                "run-shell",
+                "tmux-leap send-input toggle-multi-mode"
+            ]
+        );
+        assert!(
+            !args.iter().any(|arg| arg == "-b"),
+            "leap input bindings must not use run-shell -b; background jobs can race Tab after the next hint key"
+        );
+    }
 }

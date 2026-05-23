@@ -61,6 +61,8 @@ Reload: `tmux source-file ~/.tmux.conf`
 | Enter hint mode | `prefix + f` (default) |
 | Enter jump mode | `prefix + j` (default) |
 | Select a match | type its hint letters |
+| Toggle multi-select mode | `Tab` |
+| Finish multi-select mode | `Tab` again |
 | Exit without selecting | `q` / `Escape` / `Ctrl-c` |
 
 ### Modifier keys (inside hint mode)

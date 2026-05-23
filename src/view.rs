@@ -77,3 +77,68 @@ impl<'a> View<'a> {
         self.state.exiting = true;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hinter::PaneInput;
+    use crate::match_formatter::MatchFormatter;
+
+    fn test_hinter() -> Hinter {
+        Hinter::new(
+            vec![PaneInput {
+                lines: vec!["foo".into()],
+                pane_id: "%1".into(),
+                width: 80,
+                tty_path: "/dev/null".into(),
+            }],
+            vec!["foo".into()],
+            vec!["a".into()],
+            MatchFormatter::new(
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                "left".into(),
+            ),
+            true,
+            String::new(),
+            &State::default(),
+        )
+    }
+
+    #[test]
+    fn tab_then_hint_keeps_session_open_and_selects_match() {
+        let mut hinter = test_hinter();
+        let mut state = State::default();
+        hinter.run(&state).unwrap();
+
+        let mut view = View::new(&mut hinter, &mut state, "default".into());
+        view.process_input("toggle-multi-mode");
+        view.process_input("hint:a:main");
+
+        assert!(view.state.multi_mode);
+        assert!(!view.state.exiting, "multi-select should not exit after first selected hint");
+        assert_eq!(view.state.multi_matches, vec!["foo"]);
+        assert_eq!(view.state.selected_hints, vec!["a"]);
+        assert!(view.state.input.is_empty());
+        assert!(view.state.result.is_empty());
+    }
+
+    #[test]
+    fn second_tab_finishes_multi_select_with_joined_result() {
+        let mut hinter = test_hinter();
+        let mut state = State::default();
+        hinter.run(&state).unwrap();
+
+        let mut view = View::new(&mut hinter, &mut state, "default".into());
+        view.process_input("toggle-multi-mode");
+        view.process_input("hint:a:main");
+        view.process_input("toggle-multi-mode");
+
+        assert!(!view.state.multi_mode);
+        assert!(view.state.exiting);
+        assert_eq!(view.state.result, "foo");
+    }
+}
