@@ -108,6 +108,7 @@ impl Hinter {
                 continue;
             }
 
+            let mut visual_row = 1usize;
             for (li, line) in input.lines.iter().enumerate() {
                 let rendered = self.render_line(line, &cache[pi][li], state);
                 let pad_w = compute_padding(line, input.width);
@@ -115,10 +116,22 @@ impl Hinter {
                 // content. Wide characters that the terminal renders wider than
                 // wcwidth() predicts can no longer push subsequent lines down — each
                 // CUP overrides any auto-wrap from the previous line.
-                write!(file, "\x1b[{};1H{}", li + 1, rendered)?;
+                //
+                // visual_row tracks the actual terminal row, not the logical line
+                // index. When capture-pane -J joins wrapped lines, one logical line
+                // can occupy several visual rows; using li+1 would place subsequent
+                // lines inside the wrapped content of the previous one.
+                write!(file, "\x1b[{};1H{}", visual_row, rendered)?;
                 if pad_w > 0 {
                     write!(file, "{:1$}", "", pad_w)?;
                 }
+                let line_w = display_width::of_str_with_tabs(line);
+                let rows_taken = if input.width > 0 {
+                    ((line_w + input.width - 1) / input.width).max(1)
+                } else {
+                    1
+                };
+                visual_row += rows_taken;
             }
             // Park the cursor at home so any deferred-wrap state on the last line
             // is consumed by an escape (not a printable byte) before any future
@@ -336,7 +349,15 @@ fn extract_capture_info<'h>(
 }
 
 fn compute_padding(raw_line: &str, width: usize) -> usize {
-    width.saturating_sub(display_width::of_str_with_tabs(raw_line))
+    if width == 0 { return 0; }
+    let line_w = display_width::of_str_with_tabs(raw_line);
+    if line_w >= width {
+        // Wrapped line: pad only the last partial row.
+        let remainder = line_w % width;
+        if remainder == 0 { 0 } else { width - remainder }
+    } else {
+        width - line_w
+    }
 }
 
 fn expand_tabs(s: &str) -> String {
@@ -462,6 +483,21 @@ mod tests {
         // "def" → col 11. Padding to width 15 = 4. The previous fixed-8 model
         // would have over-counted the line as col 14, returning 1.
         assert_eq!(compute_padding("abc\tdef", 15), 4);
+    }
+
+    #[test]
+    fn compute_padding_wrapped_line_pads_last_row() {
+        // A 200-char line in an 80-col pane fills rows 1-2 fully and puts 40 chars
+        // in row 3. Padding should be 40 (= 80 - 40) to fill the last partial row.
+        let long_line: String = "a".repeat(200);
+        assert_eq!(compute_padding(&long_line, 80), 40);
+    }
+
+    #[test]
+    fn compute_padding_exactly_full_rows_needs_no_pad() {
+        // 160 chars in an 80-col pane fills exactly 2 rows; no padding needed.
+        let full_line: String = "a".repeat(160);
+        assert_eq!(compute_padding(&full_line, 80), 0);
     }
 
     #[test]
