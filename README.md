@@ -17,7 +17,7 @@ Press `j` → `https://example.com` is in your clipboard.
 
 - **Multi-pane** — hints span every pane in the active window simultaneously
 - **Huffman-coded hints** — shortest possible key sequences for the most common matches
-- **Built-in patterns** — URLs, paths, SHAs, UUIDs, IPs, hex values, git status, diff output, Kubernetes resources
+- **Built-in patterns** — URLs, paths, SHAs, UUIDs, IPs, hex values, git status, diff output
 - **Custom patterns** — add your own via `@leap-pattern-NAME` tmux options
 - **Modifier keys** — main / Shift / Ctrl / Alt each trigger a different action
 - **Jump mode** — move the cursor to a match's location in copy-mode
@@ -135,7 +135,7 @@ set -g @leap-enabled-builtin-patterns 'url,path,sha,uuid'
 ```
 
 Available: `ip` · `uuid` · `sha` · `digit` · `url` · `path` · `hex` ·
-`kubernetes` · `git-status` · `git-status-branch` · `diff`
+`git-status` · `git-status-branch` · `diff`
 
 ## How it works
 
