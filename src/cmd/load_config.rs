@@ -28,6 +28,8 @@ pub fn run() {
         match method.as_str() {
             "key"                       => config.key = value.clone(),
             "jump_key"                  => config.jump_key = value.clone(),
+            "words_key"                 => config.words_key = value.clone(),
+            "jump_words_key"            => config.jump_words_key = value.clone(),
             "keyboard_layout"           => config.keyboard_layout = value.clone(),
             "main_action"               => config.main_action = value.clone(),
             "ctrl_action"               => config.ctrl_action = value.clone(),
@@ -99,16 +101,33 @@ pub fn run() {
 
 fn setup_root_bindings(cli: &str, config: &Config) {
     let log_path = crate::config::cache_dir().join("leap.log").to_string_lossy().into_owned();
-    crate::tmux::exec(&[
-        "bind-key", &config.key,
-        "run-shell", "-b",
-        &format!("{cli} start \"#{{pane_id}}\" >>{log_path} 2>&1"),
-    ]);
-    crate::tmux::exec(&[
-        "bind-key", &config.jump_key,
-        "run-shell", "-b",
-        &format!("{cli} start --mode jump \"#{{pane_id}}\" >>{log_path} 2>&1"),
-    ]);
+    for (key, cmd) in root_bindings(cli, &log_path, config) {
+        crate::tmux::exec(&[
+            "bind-key", &key,
+            "run-shell", "-b", &cmd,
+        ]);
+    }
+}
+
+fn root_bindings(cli: &str, log_path: &str, config: &Config) -> Vec<(String, String)> {
+    vec![
+        (
+            config.key.clone(),
+            format!("{cli} start \"#{{pane_id}}\" >>{log_path} 2>&1"),
+        ),
+        (
+            config.jump_key.clone(),
+            format!("{cli} start --mode jump \"#{{pane_id}}\" >>{log_path} 2>&1"),
+        ),
+        (
+            config.words_key.clone(),
+            format!("{cli} start --words \"#{{pane_id}}\" >>{log_path} 2>&1"),
+        ),
+        (
+            config.jump_words_key.clone(),
+            format!("{cli} start --mode jump --words \"#{{pane_id}}\" >>{log_path} 2>&1"),
+        ),
+    ]
 }
 
 fn setup_leap_mode_bindings(cli: &str) {
@@ -173,6 +192,33 @@ fn option_to_method(option: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_bindings_emits_four_entries_with_default_keys() {
+        let config = Config::default();
+        let bindings = root_bindings("tmux-leap", "/tmp/leap.log", &config);
+
+        let by_key: std::collections::HashMap<String, String> =
+            bindings.into_iter().collect();
+
+        assert_eq!(by_key.len(), 4, "expected 4 root bindings, got {by_key:?}");
+        assert_eq!(
+            by_key.get("f").map(String::as_str),
+            Some("tmux-leap start \"#{pane_id}\" >>/tmp/leap.log 2>&1"),
+        );
+        assert_eq!(
+            by_key.get("j").map(String::as_str),
+            Some("tmux-leap start --mode jump \"#{pane_id}\" >>/tmp/leap.log 2>&1"),
+        );
+        assert_eq!(
+            by_key.get("F").map(String::as_str),
+            Some("tmux-leap start --words \"#{pane_id}\" >>/tmp/leap.log 2>&1"),
+        );
+        assert_eq!(
+            by_key.get("J").map(String::as_str),
+            Some("tmux-leap start --mode jump --words \"#{pane_id}\" >>/tmp/leap.log 2>&1"),
+        );
+    }
 
     #[test]
     fn leap_mode_binds_tab_to_multi_select_toggle() {

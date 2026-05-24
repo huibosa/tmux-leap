@@ -43,6 +43,10 @@ pub const DISALLOWED_HINT_CHARS: &[char] = &['c', 'i', 'm', 'q', 'n'];
 pub struct Config {
     pub key: String,
     pub jump_key: String,
+    #[serde(default = "default_words_key")]
+    pub words_key: String,
+    #[serde(default = "default_jump_words_key")]
+    pub jump_words_key: String,
     pub keyboard_layout: String,
     pub alphabet: Vec<String>,
     pub patterns: HashMap<String, String>,
@@ -66,8 +70,10 @@ impl Default for Config {
     fn default() -> Self {
         use crate::tmux::style::parse_style;
         Config {
-            key: "F".into(),
-            jump_key: "J".into(),
+            key: "f".into(),
+            jump_key: "j".into(),
+            words_key: "F".into(),
+            jump_words_key: "J".into(),
             keyboard_layout: "qwerty".into(),
             alphabet: vec![],
             patterns: HashMap::new(),
@@ -122,6 +128,14 @@ impl Config {
             .map(|c| c.to_string())
             .collect()
     }
+}
+
+fn default_words_key() -> String {
+    "F".into()
+}
+
+fn default_jump_words_key() -> String {
+    "J".into()
 }
 
 pub fn config_path() -> std::path::PathBuf {
