@@ -35,6 +35,10 @@ pub struct StartArgs {
     #[arg(long)]
     pub patterns: Option<String>,
 
+    /// Hint every whitespace-delimited token (\S+) instead of configured patterns
+    #[arg(long)]
+    pub words: bool,
+
     /// Action when a hint is selected with no modifier
     #[arg(long)]
     pub main_action: Option<String>,

@@ -25,7 +25,7 @@ pub fn run(args: StartArgs) {
 
     let (active_pane, target_pane, window_panes) = resolve_pane(&args.pane_id);
 
-    let patterns = if args.mode == "jump" {
+    let patterns = if args.words {
         vec![r"\S+".to_string()]
     } else if let Some(p) = &args.patterns {
         patterns_from_option(p, &config)
