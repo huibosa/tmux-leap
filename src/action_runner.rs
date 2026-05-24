@@ -66,6 +66,15 @@ impl<'a> ActionRunner<'a> {
                 use std::io::Write;
                 let _ = stdin.write_all(expanded.as_bytes());
             }
+
+            // Jump navigation must finish before the overlay teardown swaps panes
+            // back and kills the [leap] window. Otherwise the synchronous teardown
+            // tmux calls can interleave with this child tmux batch and leave the
+            // copy-mode cursor a row or two away from the selected target,
+            // especially when the target pane contains soft-wrapped output.
+            if self.mode == "jump" {
+                let _ = c.wait();
+            }
         }
     }
 

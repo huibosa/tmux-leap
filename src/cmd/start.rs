@@ -218,6 +218,10 @@ impl HintsSession {
         pane::resize_pane_batch(&resizes);
 
         // Build PaneInputs
+        // Jump offsets are copy-mode grid coordinates. tmux copy-mode
+        // cursor-down moves by physical rows, including soft-wrap
+        // continuations, so jump mode must keep capture-pane's default
+        // unjoined output. Other modes join wrapped lines for nicer matching.
         let join = mode != "jump";
         let pane_inputs: Vec<PaneInput> = pairs
             .iter()
