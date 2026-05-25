@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 CURRENT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-LEAP_VERSION="0.2.0"
+LEAP_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$CURRENT_DIR/Cargo.toml" | head -1)
 
 BIN_DIR="$CURRENT_DIR/bin"
 BIN="$BIN_DIR/tmux-leap"
