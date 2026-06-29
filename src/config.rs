@@ -6,6 +6,7 @@ pub const BUILTIN_PATTERNS: &[(&str, &str)] = &[
     ("uuid",  r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
     ("sha",   r"[0-9a-f]{7,128}"),
     ("digit", r"[0-9]{4,}"),
+    ("number", r"\d+(?:\.\d+)?|\.\d+"),
     ("url",   r#"((https?://|git@|git://|ssh://|ftp://|file:///)[^\s()"']+)"#),
     ("path",  r"(([.\w\-~\$@]+)?(/[.\w\-@]+)+/?)"),
     ("hex",   r"(0x[0-9a-fA-F]+)"),
@@ -150,4 +151,33 @@ pub fn cache_dir() -> std::path::PathBuf {
 
 pub fn socket_path() -> std::path::PathBuf {
     cache_dir().join("leap.sock")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn builtin(name: &str) -> &'static str {
+        BUILTIN_PATTERNS
+            .iter()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| *v)
+            .unwrap_or_else(|| panic!("missing built-in pattern: {name}"))
+    }
+
+    #[test]
+    fn number_pattern_matches_integers_and_decimals() {
+        let re = regex::Regex::new(builtin("number")).unwrap();
+        for s in ["0", "42", "100", "3.14", ".5", "12.0"] {
+            let m = re.find(s).unwrap_or_else(|| panic!("no match for {s}"));
+            assert_eq!(m.as_str(), s, "should match the whole token {s}");
+        }
+    }
+
+    #[test]
+    fn number_pattern_rejects_non_numbers() {
+        let re = regex::Regex::new(builtin("number")).unwrap();
+        assert!(!re.is_match("abc"));
+        assert!(!re.is_match("."));
+    }
 }

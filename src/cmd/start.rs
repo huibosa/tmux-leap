@@ -26,7 +26,7 @@ pub fn run(args: StartArgs) {
     let (active_pane, target_pane, window_panes) = resolve_pane(&args.pane_id);
 
     let patterns = if args.words {
-        vec![r"\S+".to_string()]
+        vec![words_pattern(args.words_min)]
     } else if let Some(p) = &args.patterns {
         patterns_from_option(p, &config)
     } else {
@@ -137,6 +137,17 @@ fn resolve_pane(pane_target: &str) -> (Pane, Pane, Vec<Pane>) {
             .unwrap_or_else(|| panic!("pane not found: {pane_id}"));
         let active = panes.first().cloned().unwrap_or_else(|| target.clone());
         (active, target, panes)
+    }
+}
+
+/// Regex for `--words` mode. `min <= 1` keeps the historic `\S+` (every token);
+/// a larger `min` requires at least that many non-space characters, so short
+/// tokens are neither highlighted nor selectable.
+fn words_pattern(min: usize) -> String {
+    if min <= 1 {
+        r"\S+".to_string()
+    } else {
+        format!(r"\S{{{min},}}")
     }
 }
 
@@ -376,4 +387,25 @@ fn pair_by_position(source: &[Pane], leap: &[Pane]) -> Vec<(Pane, Pane)> {
                 .map(|lp| (src.clone(), (*lp).clone()))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn words_pattern_defaults_to_all_tokens() {
+        assert_eq!(words_pattern(0), r"\S+");
+        assert_eq!(words_pattern(1), r"\S+");
+    }
+
+    #[test]
+    fn words_pattern_applies_minimum_length() {
+        assert_eq!(words_pattern(8), r"\S{8,}");
+
+        let re = regex::Regex::new(&words_pattern(8)).unwrap();
+        assert!(re.is_match("longenough")); // 10 chars
+        assert!(re.is_match("exactly8"));   // 8 chars
+        assert!(!re.is_match("short"));     // 5 chars
+    }
 }

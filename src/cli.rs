@@ -39,6 +39,10 @@ pub struct StartArgs {
     #[arg(long)]
     pub words: bool,
 
+    /// In --words mode, only hint tokens at least N characters long (1 = all)
+    #[arg(long, default_value_t = 1)]
+    pub words_min: usize,
+
     /// Action when a hint is selected with no modifier
     #[arg(long)]
     pub main_action: Option<String>,

@@ -134,7 +134,7 @@ set -g @leap-pattern-digest 'sha256:[a-f0-9]{64}'
 set -g @leap-enabled-builtin-patterns 'url,path,sha,uuid'
 ```
 
-Available: `ip` · `uuid` · `sha` · `digit` · `url` · `path` · `hex` ·
+Available: `ip` · `uuid` · `sha` · `digit` · `number` · `url` · `path` · `hex` ·
 `git-status` · `git-status-branch` · `diff`
 
 ## How it works

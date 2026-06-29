@@ -121,11 +121,11 @@ fn root_bindings(cli: &str, log_path: &str, config: &Config) -> Vec<(String, Str
         ),
         (
             config.words_key.clone(),
-            format!("{cli} start --words \"#{{pane_id}}\" >>{log_path} 2>&1"),
+            format!("{cli} start --words --words-min 8 \"#{{pane_id}}\" >>{log_path} 2>&1"),
         ),
         (
             config.jump_words_key.clone(),
-            format!("{cli} start --mode jump --words \"#{{pane_id}}\" >>{log_path} 2>&1"),
+            format!("{cli} start --mode jump --words --words-min 8 \"#{{pane_id}}\" >>{log_path} 2>&1"),
         ),
     ]
 }
@@ -212,11 +212,11 @@ mod tests {
         );
         assert_eq!(
             by_key.get("F").map(String::as_str),
-            Some("tmux-leap start --words \"#{pane_id}\" >>/tmp/leap.log 2>&1"),
+            Some("tmux-leap start --words --words-min 8 \"#{pane_id}\" >>/tmp/leap.log 2>&1"),
         );
         assert_eq!(
             by_key.get("J").map(String::as_str),
-            Some("tmux-leap start --mode jump --words \"#{pane_id}\" >>/tmp/leap.log 2>&1"),
+            Some("tmux-leap start --mode jump --words --words-min 8 \"#{pane_id}\" >>/tmp/leap.log 2>&1"),
         );
     }
 
