@@ -7,7 +7,7 @@ tmux panes with selectable Huffman-coded letter hints.
 
 ```bash
 cargo build --release          # produces target/release/tmux-leap
-cargo test                     # 20 unit tests, no tmux required
+cargo test                     # 50 unit tests, no tmux required
 cargo build                    # dev build for quick iteration
 ```
 

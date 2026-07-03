@@ -6,7 +6,7 @@ pub const BUILTIN_PATTERNS: &[(&str, &str)] = &[
     ("uuid",  r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
     ("sha",   r"[0-9a-f]{7,128}"),
     ("digit", r"[0-9]{4,}"),
-    ("number", r"\d+(?:\.\d+)?|\.\d+"),
+    ("number", r"\d+\.\d+|\d{3,}|\.\d{2,}"),
     ("url",   r#"((https?://|git@|git://|ssh://|ftp://|file:///)[^\s()"']+)"#),
     ("path",  r"(([.\w\-~\$@]+)?(/[.\w\-@]+)+/?)"),
     ("hex",   r"(0x[0-9a-fA-F]+)"),
@@ -166,11 +166,21 @@ mod tests {
     }
 
     #[test]
-    fn number_pattern_matches_integers_and_decimals() {
+    fn number_pattern_matches_numbers_with_three_or_more_chars() {
         let re = regex::Regex::new(builtin("number")).unwrap();
-        for s in ["0", "42", "100", "3.14", ".5", "12.0"] {
+        // Integers, decimals, and leading-dot decimals — all >= 3 chars.
+        for s in ["100", "999", "3.14", "12.0", "1.2", ".50", ".123", "100.5"] {
             let m = re.find(s).unwrap_or_else(|| panic!("no match for {s}"));
             assert_eq!(m.as_str(), s, "should match the whole token {s}");
+        }
+    }
+
+    #[test]
+    fn number_pattern_rejects_numbers_below_three_chars() {
+        let re = regex::Regex::new(builtin("number")).unwrap();
+        // 1- and 2-char numbers are filtered out as noise.
+        for s in ["0", "5", "42", ".5"] {
+            assert!(re.find(s).is_none(), "{s} should not match (too short)");
         }
     }
 
