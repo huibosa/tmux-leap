@@ -194,19 +194,18 @@ impl HintsSession {
             window_panes
         };
 
-        // Create leap window with one pane
+        // Create leap window with one pane and give it the source dimensions before
+        // splitting. Redistributing after every split prevents tmux from repeatedly
+        // shrinking the same active pane until there is no room for the next one.
         let fw = pane::create_window("[leap]", "cat");
-
-        // Split to match source pane count (already have 1)
-        for _ in 1..source_panes.len() {
-            pane::split_window(&fw.window_id);
-        }
-
-        // Resize leap window to match source window dimensions
         if !source_panes.is_empty() {
             let source_w = source_panes.iter().map(|p| p.pane_left + p.pane_width).max().unwrap_or(80);
             let source_h = source_panes.iter().map(|p| p.pane_top + p.pane_height).max().unwrap_or(24);
             pane::resize_window(&fw.window_id, source_w, source_h);
+        }
+        for _ in 1..source_panes.len() {
+            pane::split_window(&fw.window_id);
+            pane::select_layout(&fw.window_id, "tiled");
         }
 
         // Mirror layout for multi-pane (ADR 0004)
